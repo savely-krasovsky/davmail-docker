@@ -13,22 +13,25 @@ on:
 jobs:
   build-image:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Checkout
         uses: actions/checkout@v3
-
       - name: Prepare
         id: prep
         run: |
           set -x
-          DOCKER_IMAGE=ghcr.io/${{ github.repository_owner }}/${GITHUB_REPOSITORY#*/}
-          
+          REPO_NAME=$(echo "${{ github.repository }}" | cut -d'/' -f2)
+          DOCKER_IMAGE="ghcr.io/${{ github.repository_owner }}/${REPO_NAME}"
+
           if [[ $GITHUB_REF == refs/tags/* ]]; then
             VERSION=${GITHUB_REF#refs/tags/}
           else
             VERSION=latest
           fi
-          
+
           TAGS="${DOCKER_IMAGE}:${VERSION}"
 
           # Для tagged releases также добавляем тег 'latest'
@@ -63,7 +66,7 @@ jobs:
           builder: ${{ steps.buildx.outputs.name }}
           context: .
           file: ./Dockerfile
-          platforms: linux/amd64,linux/arm64/v8
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.prep.outputs.tags }}
 
@@ -72,7 +75,7 @@ jobs:
           # ./tests/*.yaml tests the image in test environment
           # ./docker-compose.yaml tests the ./docker-compose.yaml example, not the image
           COMPOSE_FILE: ./tests/compose-sut.yaml:./docker-compose.yaml
-          IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/${GITHUB_REPOSITORY#*/}:${{ steps.prep.outputs.version }}
+          IMAGE_NAME: ${{ steps.prep.outputs.docker_image }}:${{ steps.prep.outputs.version }}
         run: |
           set -e
           docker compose up --force-recreate --build --exit-code-from sut sut
