@@ -11,70 +11,8 @@ on:
     - cron: '15 2 * * sun,tue,thu,sat'
 
 jobs:
-  build-matrix:
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.set-matrix.outputs.matrix }}
-    steps:
-      - name: Set matrix
-        id: set-matrix
-        run: |
-         set -x
-         # Enable bash expand aliases for non-interactive shells
-         shopt -s expand_aliases
-         
-         # Wrapper
-         alias wrap='
-         {
-          for c in $(cat); do
-           alias ${TOOL_NAME:-${c}}="${CONTAINER_RUN:-podman run -i --rm} ${CONTAINER_RUN_ARGS} docker.io/kran0/tiny:${c}";
-          done;
-          unset c;
-         }<<<'
-         
-         wrap 'xmlstarlet jq'
-         CONTAINER_RUN_ARGS='--dns-opt="options single-request"' wrap 'svn'
-         
-         function addElementToMatrix {
-          [ -z "${MATRIX}" ] && MATRIX='{}'
-          jq --compact-output --arg revision "${1:-HEAD}" --arg tag "${2:-trunk}" ' . += {
-          "include":[
-           { "tag": $tag, "revision": $revision }
-          ]
-         }' <<< "${MATRIX}"
-         }
-         
-         # Begin MATRIX construction
-         
-         # Add trunk to the matrix
-         [ "${BUILD_TRUNK:-true}" '==' 'true' ] && MATRIX=$(addElementToMatrix)
-         
-         # Search the release pattern in the latest 100 svn repo commits
-         # Print revision and version number
-         # Set LATEST_REVISION and LATEST_VERSION env vars
-         LATEST=$(svn log https://svn.code.sf.net/p/davmail/code/trunk --limit 100 --search 'Prepare [0-9]*.[0-9]*.[0-9]* release' --xml\
-           | xmlstarlet sel -T -t -m '/log/logentry[1]' -v 'concat(@revision, " " , substring-before(substring-after(msg, "Prepare "), " release"))' -n)
-         LATEST_REVISION="${LATEST%% *}"
-         LATEST_VERSION="${LATEST##* }"
-         unset LATEST
-         
-         # Check previous built image with TAG=LATEST_VERSION
-         # Set BUILD_RELEASE on fail
-         podman manifest inspect "docker.io/kran0/davmail-docker:${LATEST_VERSION}" || BUILD_RELEASE=true
-         
-         # Add release to the MATRIX
-         [ "${BUILD_RELEASE:-false}" '==' 'true' ] && MATRIX=$(addElementToMatrix ${LATEST_REVISION} ${LATEST_VERSION})
-         # Todo: for some strange reason, if the element (.include) is the same, the command above replaces its content. Suitable for us!
-
-         echo "matrix=${MATRIX}" >> $GITHUB_OUTPUT
-
   build-image:
-    needs: build-matrix
     runs-on: ubuntu-latest
-    strategy:
-      max-parallel: 1
-      matrix: ${{ fromJson(needs.build-matrix.outputs.matrix) }}
-
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -83,23 +21,24 @@ jobs:
         id: prep
         run: |
           set -x
-          DOCKER_IMAGE=${{ secrets.DOCKERHUB_USER }}/${GITHUB_REPOSITORY#*/}
-          VERSION="${{ matrix.tag }}"
-          BUILD_ARGS="DAVMAIL_REV=${{ matrix.revision }}"
+          DOCKER_IMAGE=ghcr.io/${{ github.repository_owner }}/${GITHUB_REPOSITORY#*/}
+          
+          if [[ $GITHUB_REF == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/}
+          else
+            VERSION=latest
+          fi
+          
           TAGS="${DOCKER_IMAGE}:${VERSION}"
-          TEST_TAG="${TAGS}"
 
-          # If the VERSION looks like a version number, assume that
-          # this is the most recent version of the image and also
-          # tag it 'latest'.
-          if [[ $VERSION =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+          # Для tagged releases также добавляем тег 'latest'
+          if [[ $GITHUB_REF == refs/tags/* ]]; then
             TAGS="$TAGS,${DOCKER_IMAGE}:latest"
           fi
 
-          # Set output parameters.
+          # Set output parameters
           echo "tags=${TAGS}" >> $GITHUB_OUTPUT
-          echo "test_tag=${TEST_TAG}" >> $GITHUB_OUTPUT
-          echo "build_args=${BUILD_ARGS}" >> $GITHUB_OUTPUT
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v2
@@ -110,14 +49,15 @@ jobs:
         id: buildx
         uses: docker/setup-buildx-action@v2
 
-      - name: Login to DockerHub
+      - name: Login to GitHub Container Registry
         if: github.event_name != 'pull_request'
         uses: docker/login-action@v2
         with:
-          username: ${{ secrets.DOCKERHUB_USER }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build
+      - name: Build and push
         uses: docker/build-push-action@v3
         with:
           builder: ${{ steps.buildx.outputs.name }}
@@ -126,24 +66,23 @@ jobs:
           platforms: linux/amd64,linux/arm64/v8
           push: true
           tags: ${{ steps.prep.outputs.tags }}
-          build-args: ${{ steps.prep.outputs.build_args }}
 
       - name: Test default arch
         env:
           # ./tests/*.yaml tests the image in test environment
           # ./docker-compose.yaml tests the ./docker-compose.yaml example, not the image
           COMPOSE_FILE: ./tests/compose-sut.yaml:./docker-compose.yaml
-          IMAGE_NAME: ${{ steps.prep.outputs.test_tag }}
+          IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/${GITHUB_REPOSITORY#*/}:${{ steps.prep.outputs.version }}
         run: |
-         set -e
-         docker compose up --force-recreate --build --exit-code-from sut sut
-         docker compose down
+          set -e
+          docker compose up --force-recreate --build --exit-code-from sut sut
+          docker compose down
 
-         podman play kube k8s-pod.yaml
-         podman pod stop davmail-pod
-         podman pod rm davmail-pod
+          podman play kube k8s-pod.yaml
+          podman pod stop davmail-pod
+          podman pod rm davmail-pod
 
-         # sudo apt update && sudo apt -y install python3-pip
-         # pip install podman-compose # you may use: pip3 install podman-compose
-         # podman-compose up --force-recreate --build --exit-code-from sut sut
-         # podman-compose down
+          # sudo apt update && sudo apt -y install python3-pip
+          # pip install podman-compose # you may use: pip3 install podman-compose
+          # podman-compose up --force-recreate --build --exit-code-from sut sut
+          # podman-compose down
