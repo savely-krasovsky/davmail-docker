@@ -41,6 +41,8 @@ RUN /davmail-entrypoint/generator /davmail-code/src/etc/davmail.properties > /ta
 
 FROM ${BASE_IMAGE}
 
+LABEL org.opencontainers.image.source = "https://github.com/savely-krasovsky/davmail-docker"
+
 COPY --from=builder /target /
 
 EXPOSE 1110 1025 1143 1080 1389
